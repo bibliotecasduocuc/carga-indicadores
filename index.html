@@ -960,9 +960,9 @@ const CONFIG = {
         accion:      { col: "Nombre de la acción", etiqueta: "Acción formativa",
                        alias: ["Nombre oficial acc. Formativa"] },
         actividad:   { col: "Actividad", etiqueta: "Tipo de actividad" },
-        carrera:     { col: "Carrera", etiqueta: "Carrera" },
+        carrera:     { col: "Carrera", etiqueta: "Carrera", fusionar: true },
         /* La escuela la pone el agregador desde la tabla «Escuelas»: acá solo se lee. */
-        escuela:     { col: "Escuela", etiqueta: "Escuela" },
+        escuela:     { col: "Escuela", etiqueta: "Escuela", fusionar: true },
         tipoUsuario: { col: "Tipo de Usuario", etiqueta: "Jornada del participante" },
         formato:     { col: "Formato", etiqueta: "Formato" },
         ia:          { col: "Taller IA?", etiqueta: "Taller de IA" }
@@ -987,8 +987,8 @@ const CONFIG = {
       dimensiones: {
         categoria: { col: "Identificación 1", etiqueta: "Tipo de recurso" },
         recurso:   { col: "Identificación 2", etiqueta: "Recurso digital" },
-        carrera:   { col: "Carrera", etiqueta: "Carrera" },
-        escuela:   { col: "Escuela", etiqueta: "Escuela" },
+        carrera:   { col: "Carrera", etiqueta: "Carrera", fusionar: true },
+        escuela:   { col: "Escuela", etiqueta: "Escuela", fusionar: true },
         perfil:    { col: "Tipo Usuario", etiqueta: "Perfil de usuario" }
       },
       /* Los usuarios únicos NO se pueden calcular desde la hoja de hechos: ahí las
@@ -1055,8 +1055,8 @@ const CONFIG = {
         tipo:     { col: "TIPO TRANSACCION", etiqueta: "Tipo de transacción" },
         estacion: { col: "ESTACION TRANSACCION", etiqueta: "Lugar de la transacción" },
         perfil:   { col: "PERFIL", etiqueta: "Perfil de usuario" },
-        carrera:  { col: "CARRERA", etiqueta: "Carrera" },
-        escuela:  { col: "Escuela", etiqueta: "Escuela" },
+        carrera:  { col: "CARRERA", etiqueta: "Carrera", fusionar: true },
+        escuela:  { col: "Escuela", etiqueta: "Escuela", fusionar: true },
         item:     { col: "TIPO ITEM", etiqueta: "Tipo de material" },
         /* Único cruce necesario: separar préstamos de renovaciones dentro de cada
            modalidad de atención, porque no tienen las mismas vías disponibles. */
@@ -1094,8 +1094,8 @@ const CONFIG = {
         tipo:     { col: "TIPO TRANSACCION", etiqueta: "Tipo de transacción" },
         estacion: { col: "ESTACION TRANSACCION", etiqueta: "Lugar de la transacción" },
         perfil:   { col: "PERFIL", etiqueta: "Perfil de usuario" },
-        carrera:  { col: "CARRERA", etiqueta: "Carrera" },
-        escuela:  { col: "Escuela", etiqueta: "Escuela" },
+        carrera:  { col: "CARRERA", etiqueta: "Carrera", fusionar: true },
+        escuela:  { col: "Escuela", etiqueta: "Escuela", fusionar: true },
         item:     { col: "TIPO ITEM", etiqueta: "Tipo de material" },
         /* Único cruce necesario: separar préstamos de renovaciones dentro de cada
            modalidad de atención, porque no tienen las mismas vías disponibles. */
@@ -1884,7 +1884,27 @@ function leerTransaccional(ind, matriz, filtroGlobal){
     const i = buscarColumna(enc, def.col, def.alias || []);
     if (i === -1) anotar("Formato", ind.nombre + ": la hoja no trae la columna «" + def.col +
       "», así que el desglose «" + def.etiqueta + "» queda sin datos.");
-    else dims.push({ id, i, etiqueta: def.etiqueta, esSede: !!def.esSede });
+    else dims.push({ id, i, etiqueta: def.etiqueta, esSede: !!def.esSede, fusionar: !!def.fusionar });
+  }
+
+  /* Carreras y escuelas escritas con y sin tilde son la misma: se juntan bajo una sola
+     etiqueta, la que lleva tildes. Se decide mirando toda la hoja antes de contar, para
+     que la etiqueta no dependa de cuál apareció primero. */
+  for (const d of dims){
+    if (!d.fusionar) continue;
+    const variantes = new Map();
+    for (let f = idxEnc + 1; f < matriz.length; f++){
+      const fila = matriz[f];
+      if (!fila) continue;
+      const v = fila[d.i] == null ? "" : String(fila[d.i]).trim();
+      if (v === "") continue;
+      const k = norm(v);
+      let m = variantes.get(k);
+      if (!m){ m = new Map(); variantes.set(k, m); }
+      m.set(v, (m.get(v) || 0) + 1);
+    }
+    d.canon = new Map();
+    variantes.forEach((m, k) => d.canon.set(k, mejorEscritura([...m.entries()])));
   }
   const iRut = ind.colRut ? buscarColumna(enc, ind.colRut, ind.aliasIdentidad || []) : -1;
   /* Identidad para el conteo de únicos. Se guardan conjuntos por sede y mes: los
@@ -2283,7 +2303,20 @@ function valorDimension(fila, d){
   /* Las dimensiones que contienen sedes se normalizan igual que la columna de sede,
      para que «Valparaísp» y «Valparaíso» no se lean como dos lugares distintos. */
   if (d.esSede) return normalizarSedeSilenciosa(v);
+  if (d.canon){ const c = d.canon.get(norm(v)); if (c) return c; }
   return v;
+}
+
+/** Cuántas letras con tilde o ñ tiene un texto. */
+function cuentaTildes(t){
+  return (String(t).match(/[áéíóúüñÁÉÍÓÚÜÑ]/g) || []).length;
+}
+/**
+ * La mejor escritura entre varias de un mismo nombre: la que tiene más tildes y, a
+ * igualdad, la más frecuente. [[texto, veces], …]
+ */
+function mejorEscritura(pares){
+  return pares.slice().sort((a, b) => (cuentaTildes(b[0]) - cuentaTildes(a[0])) || (b[1] - a[1]))[0][0];
 }
 
 /** Igual que normalizarSede pero sin anotar: se usa en dimensiones, no en el eje. */
@@ -3265,10 +3298,10 @@ function construirCatalogoCarreras(){
       const e = iE === -1 ? "" : String(fila[iE] == null ? "" : fila[iE]).trim();
       if (e) escuelas.add(e);
       const previa = carreras.get(k);
-      /* Se prefiere la escritura con minúsculas y tildes para mostrar. */
+      /* Se muestra la escritura con tildes. */
       if (!previa) carreras.set(k, { etiqueta: c, escuela: e });
       else {
-        if (previa.etiqueta === previa.etiqueta.toUpperCase() && c !== c.toUpperCase()) previa.etiqueta = c;
+        if (cuentaTildes(c) > cuentaTildes(previa.etiqueta)) previa.etiqueta = c;
         if (!previa.escuela && e) previa.escuela = e;
       }
     }
