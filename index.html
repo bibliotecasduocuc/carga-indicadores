@@ -163,6 +163,8 @@ table{border-collapse:collapse;width:100%;}
 }
 select.control{cursor:pointer;padding-right:26px;}
 select.control.estrecho{max-width:140px;}
+select.control.ancho{max-width:260px;}
+.valor.no-disponible{font-size:22px !important;color:var(--texto-tenue) !important;}
 .grupo-filtro .hasta{font-size:12px;color:var(--texto-muy-tenue);padding:0 1px;}
 .grupo-filtro .atajo{
   background:var(--blanco);border:1px solid var(--borde-fuerte);border-radius:var(--radio-sm);
@@ -834,6 +836,16 @@ ol.ranking li .sec{font-size:11.5px;color:var(--texto-muy-tenue);font-weight:400
     <select class="control" id="sel-anio"></select>
   </div>
 
+  <div class="grupo-filtro">
+    <label for="sel-escuela">Escuela</label>
+    <select class="control" id="sel-escuela"></select>
+  </div>
+
+  <div class="grupo-filtro">
+    <label for="sel-carrera">Carrera</label>
+    <select class="control ancho" id="sel-carrera"></select>
+  </div>
+
   <div id="chips-filtros"></div>
   <button id="btn-pdf" type="button">Descargar PDF</button>
   <button id="btn-excel" type="button">Descargar Excel</button>
@@ -1048,7 +1060,9 @@ const CONFIG = {
         item:     { col: "TIPO ITEM", etiqueta: "Tipo de material" },
         /* Único cruce necesario: separar préstamos de renovaciones dentro de cada
            modalidad de atención, porque no tienen las mismas vías disponibles. */
-        tipoEstacion: { cols: ["TIPO TRANSACCION", "ESTACION TRANSACCION"], etiqueta: "Tipo × lugar" }
+        tipoEstacion: { cols: ["TIPO TRANSACCION", "ESTACION TRANSACCION"], etiqueta: "Tipo × lugar" },
+        /* Para el Resumen: préstamos por escuela, comparables con su tarjeta. */
+        tipoEscuela: { cols: ["TIPO TRANSACCION", "Escuela"], etiqueta: "Tipo × escuela" }
       },
       etiquetaBase: "Préstamos y renovaciones",
       nota: "Libros, revistas, mapas y trabajos de título. Considera préstamos y renovaciones realizados en mesón, en línea o por autopréstamo."
@@ -1146,7 +1160,7 @@ const CONFIG = {
        «Sin escuela» = la carrera no está en la tabla Escuelas del libro crudo. */
     sinEscuela: ["Sin escuela"],
 
-    topCarreras: 20,     // listas de carreras: top N + «Otras», con botón para ver todas
+    topCarreras: 15,     // carreras y escuelas: top N en gráfico y tabla, con botón «Ver todo»
     topRecursos: 20      // T. Digital: top N + «Otros»
   },
 
@@ -1219,21 +1233,34 @@ const ESTADO = {
     /* Rango de meses inclusivo. Cuando desde === hasta es un mes puntual. */
     mesDesde: null,
     mesHasta: null,
-    anio: null
+    anio: null,
+    /* Filtro global. Vacío = todas. */
+    escuela: "",
+    carrera: ""
   },
   /* Filtros propios de la vista Acciones Formativas. */
   filtrosAF: { actividad: "", accion: "", escuela: "", carrera: "", ia: "" },
   graficos: {},
   orden: {},
-  /* Tablas que el usuario desplegó completas («Ver todas»). */
-  expandidas: {}
+  /* Desgloses que el usuario desplegó completos («Ver todo»). */
+  expandidas: {},
+  /* Lo leído al cargar, sin filtro de escuela ni carrera, y las hojas de donde salió. */
+  base: {},
+  matrices: {},
+  /* Carreras conocidas: norm(carrera) -> { etiqueta, escuela }. */
+  carreras: new Map(),
+  escuelas: []
 };
 
 /* Registro interno de saneamiento. No se muestra en la interfaz: el dashboard lo ven
    usuarios externos y no corresponde exponer inconsistencias de la fuente. Queda en
    la consola del navegador para revisión técnica. */
 const DIAGNOSTICO = [];
+/* Mientras se vuelven a leer las hojas para el filtro de escuela o carrera no se anota
+   nada: esas lecturas repiten las de la carga y llenarían el diagnóstico de duplicados. */
+let SILENCIAR_ANOTAR = false;
 function anotar(tipo, texto){
+  if (SILENCIAR_ANOTAR) return;
   const linea = "[" + tipo + "] " + texto;
   if (DIAGNOSTICO.includes(linea)) return;
   DIAGNOSTICO.push(linea);
@@ -1646,6 +1673,9 @@ async function descargarHoja(ind){
   if (ind.tipoHoja === "matriz") return leerMatriz(ind, matriz);
 
   const r = leerTransaccional(ind, matriz);
+  /* Se guarda la hoja ya descargada: el filtro de escuela y carrera vuelve a armar las
+     cifras desde ella sin pedirla de nuevo a Google. Son hojas agregadas, chicas. */
+  ESTADO.matrices[ind.id] = matriz;
 
   /* Los usuarios únicos pueden vivir en una hoja aparte. Se lee después de la de
      hechos y en su propio try: si esa hoja falla, se pierde la cifra de personas
@@ -1793,7 +1823,7 @@ function esFilaSello(txt){
      actividades    Map("sede|anio|mes" -> Set(claves))     solo si hay claveActividad
      detalle        { cols, filas }  códigos enteros        solo si detalle: true
    ================================================================================== */
-function leerTransaccional(ind, matriz){
+function leerTransaccional(ind, matriz, filtroGlobal){
   const idxEnc = buscarEncabezado(matriz, [ind.col.sede, "sede", "biblioteca"]);
   if (idxEnc === -1){
     throw new Error("No se encontró la fila de encabezados. Se esperaba la columna «" + ind.col.sede + "».");
@@ -1884,6 +1914,17 @@ function leerTransaccional(ind, matriz){
     anotar("Formato", ind.nombre + ": no se encontró la columna «" + ind.colUnico + "» para contar usuarios únicos.");
   }
 
+  /* Filtro global de escuela y carrera. Se compara con norm(): la misma carrera viene
+     en mayúsculas en una hoja y con tildes en otra, y tiene que calzar en las dos.
+     Quien llama ya comprobó que la hoja trae las columnas. */
+  const fg = filtroGlobal || {};
+  const filtrosGlobales = [];
+  if (fg.escuela) filtrosGlobales.push({ i: buscarColumna(enc, "Escuela", []), v: norm(fg.escuela) });
+  if (fg.carrera && ind.dimensiones && ind.dimensiones.carrera){
+    filtrosGlobales.push({ i: buscarColumna(enc, ind.dimensiones.carrera.col, []), v: norm(fg.carrera) });
+  }
+  const conFiltroGlobal = filtrosGlobales.length > 0;
+
   /* Orden día/mes deducido de los propios datos. Solo hace falta si hay una columna
      de fecha que interpretar. */
   let formatoFecha = CONFIG.formatoFecha;
@@ -1940,6 +1981,10 @@ function leerTransaccional(ind, matriz){
     let fuera = false;
     for (const f of filtrosFijos){
       if (!f.valores.has(norm(fila[f.i] == null ? "" : String(fila[f.i]).trim()))){ fuera = true; break; }
+    }
+    if (fuera) continue;
+    for (const g of filtrosGlobales){
+      if (norm(fila[g.i] == null ? "" : String(fila[g.i]).trim()) !== g.v){ fuera = true; break; }
     }
     if (fuera) continue;
 
@@ -2057,7 +2102,9 @@ function leerTransaccional(ind, matriz){
     }
   }
 
-  if (total.size === 0) throw new Error("Se leyeron " + FMT_ENTERO.format(filas) + " filas pero ninguna resultó utilizable.");
+  /* Con filtro de escuela o carrera es normal que un indicador quede vacío: esa carrera
+     puede no usar ese servicio. Sin filtro, una hoja sin filas utilizables es un error. */
+  if (total.size === 0 && !conFiltroGlobal) throw new Error("Se leyeron " + FMT_ENTERO.format(filas) + " filas pero ninguna resultó utilizable.");
   if (sinFecha) anotar("Datos", ind.nombre + ": " + FMT_ENTERO.format(sinFecha) + (conPeriodo
     ? " transacciones sin año o mes válidos quedaron fuera."
     : " transacciones sin fecha interpretable quedaron fuera."));
@@ -2900,29 +2947,40 @@ function agruparEscuelas(lista){
 }
 
 /**
- * Tabla de un desglose largo: muestra los N primeros y agrupa el resto, con un botón
- * para desplegar la lista completa. El gráfico de al lado sigue mostrando solo los N
- * primeros: con 170 barras no se lee nada.
+ * Gráfico de barras y tabla de un desglose largo (carreras, escuelas): muestran los N
+ * primeros y agrupan el resto; si hay más, un botón «Ver todo» despliega la lista
+ * completa en los dos a la vez. Al desplegar, el gráfico crece en alto para que cada
+ * barra siga siendo legible.
  *
- * Desplegar o recoger redibuja solo esta tabla, no la vista entera.
+ * Desplegar o recoger redibuja solo este gráfico y esta tabla, no la vista entera.
  */
-function tablaDesgloseExpandible(id, lista, n, etiquetaResto, etiquetaCol, etiquetaValor, plural){
-  const cont = document.getElementById(id);
-  if (!cont) return;
-  const abierta = !!ESTADO.expandidas[id];
-  tablaDesglose(id, abierta ? lista : recortarTop(lista, n, etiquetaResto), etiquetaCol, etiquetaValor);
-  if (lista.length <= n) return;
+function desgloseExpandible(idGrafico, idTabla, lista, n, etiquetaResto, etiquetaCol, etiquetaValor){
+  const cont = document.getElementById(idTabla);
+  const abierta = !!ESTADO.expandidas[idTabla];
+  const visible = abierta ? lista : recortarTop(lista, n, etiquetaResto);
+
+  const lienzo = document.getElementById(idGrafico);
+  const caja = lienzo ? lienzo.parentElement : null;
+  if (caja){
+    if (caja.dataset.altoBase === undefined) caja.dataset.altoBase = caja.style.height || "";
+    caja.style.height = abierta ? Math.max(420, visible.length * 22 + 60) + "px" : caja.dataset.altoBase;
+  }
+  dibujarBarrasHorizontal(idGrafico, visible, etiquetaValor);
+  tablaDesglose(idTabla, visible, etiquetaCol, etiquetaValor);
+
+  if (!cont || lista.length <= n) return;
   const reales = lista.filter(x => !x.esNoAplica).length;
   const boton = document.createElement("button");
   boton.type = "button";
   boton.className = "ver-todas";
   boton.setAttribute("aria-expanded", abierta ? "true" : "false");
-  boton.textContent = abierta ? "Mostrar solo las " + n + " principales"
-                              : "Ver todas las " + plural + " (" + fmt(reales) + ")";
+  boton.textContent = abierta ? "Ver solo las " + n + " principales" : "Ver todo (" + fmt(reales) + ")";
   boton.addEventListener("click", () => {
-    ESTADO.expandidas[id] = !abierta;
-    tablaDesgloseExpandible(id, lista, n, etiquetaResto, etiquetaCol, etiquetaValor, plural);
-    const nuevo = document.querySelector("#" + id + " .ver-todas");
+    ESTADO.expandidas[idTabla] = !abierta;
+    desgloseExpandible(idGrafico, idTabla, lista, n, etiquetaResto, etiquetaCol, etiquetaValor);
+    /* La barra de descarga de la tabla vive afuera del contenedor y sigue sirviendo. */
+    agregarBotonesDeGrafico();
+    const nuevo = document.querySelector("#" + idTabla + " .ver-todas");
     if (nuevo) nuevo.focus();
   });
   cont.insertBefore(boton, cont.firstChild);
@@ -3161,6 +3219,141 @@ function construirFiltros(){
   });
 }
 
+/* ==================================================================================
+   FILTRO GLOBAL DE ESCUELA Y CARRERA
+
+   Las cifras se vuelven a armar desde las hojas ya descargadas, quedándose solo con las
+   filas de esa escuela o carrera. No se pide nada nuevo a Google.
+
+   Lo que la fuente no permite filtrar se muestra como «No disponible», nunca con la
+   cifra sin filtrar: en una reunión se leería como si fuera de esa escuela.
+     · Usuarios únicos de Préstamos y T. Digital: sus hojas de personas no traen carrera.
+     · Cuenta Personas: los arcos no identifican a nadie.
+   ================================================================================== */
+function filtroGlobalActivo(){ return !!(ESTADO.filtros.escuela || ESTADO.filtros.carrera); }
+function etiquetaFiltroGlobal(){
+  const f = ESTADO.filtros;
+  return [f.escuela, f.carrera && (ESTADO.carreras.get(norm(f.carrera)) || {}).etiqueta || f.carrera]
+    .filter(Boolean).join(" · ");
+}
+const TEXTO_NO_FILTRABLE = "No disponible con filtro de escuela o carrera";
+
+/** Recorre las hojas descargadas y arma el catálogo de escuelas y carreras. */
+function construirCatalogoCarreras(){
+  const carreras = new Map(), escuelas = new Set();
+  CONFIG.indicadores.forEach(ind => {
+    const m = ESTADO.matrices[ind.id];
+    const def = ind.dimensiones && ind.dimensiones.carrera;
+    if (!m || !def) return;
+    const idx = buscarEncabezado(m, [ind.col.sede, "sede"]);
+    if (idx === -1) return;
+    const enc = m[idx].map(c => String(c == null ? "" : c).trim());
+    const iC = buscarColumna(enc, def.col, []), iE = buscarColumna(enc, "Escuela", []);
+    if (iC === -1) return;
+    for (let f = idx + 1; f < m.length; f++){
+      const fila = m[f]; if (!fila) continue;
+      const c = String(fila[iC] == null ? "" : fila[iC]).trim();
+      if (!c || esSinIdentificar(c)) continue;
+      const k = norm(c);
+      const e = iE === -1 ? "" : String(fila[iE] == null ? "" : fila[iE]).trim();
+      if (e) escuelas.add(e);
+      const previa = carreras.get(k);
+      /* Se prefiere la escritura con minúsculas y tildes para mostrar. */
+      if (!previa) carreras.set(k, { etiqueta: c, escuela: e });
+      else {
+        if (previa.etiqueta === previa.etiqueta.toUpperCase() && c !== c.toUpperCase()) previa.etiqueta = c;
+        if (!previa.escuela && e) previa.escuela = e;
+      }
+    }
+  });
+  ESTADO.carreras = carreras;
+  ESTADO.escuelas = agruparEscuelas([...escuelas].map(e => ({ etiqueta: e, valor: 0 })))
+    .map(x => x.etiqueta).sort((a, b) => {
+      const ea = esSinIdentificar(a) || norm(a) === norm("Sin escuela"), eb = esSinIdentificar(b) || norm(b) === norm("Sin escuela");
+      return ea === eb ? a.localeCompare(b, "es") : (ea ? 1 : -1);
+    });
+}
+
+function opcionesCarrera(){
+  const f = ESTADO.filtros;
+  const lista = [...ESTADO.carreras.values()]
+    .filter(c => !f.escuela || norm(c.escuela) === norm(f.escuela))
+    .sort((a, b) => a.etiqueta.localeCompare(b.etiqueta, "es"));
+  return '<option value="">Todas las carreras</option>' + lista.map(c =>
+    '<option value="' + escapar(c.etiqueta) + '"' + (norm(c.etiqueta) === norm(f.carrera) ? " selected" : "") +
+    ">" + escapar(c.etiqueta) + "</option>").join("");
+}
+
+function construirFiltroGlobal(){
+  construirCatalogoCarreras();
+  const selE = document.getElementById("sel-escuela");
+  const selC = document.getElementById("sel-carrera");
+  if (!selE || !selC) return;
+  /* Sin columna Escuela en ninguna hoja (dashboard nuevo con agregados viejos) el
+     filtro de escuela no tiene nada que ofrecer. */
+  selE.innerHTML = '<option value="">Todas las escuelas</option>' +
+    ESTADO.escuelas.map(e => '<option value="' + escapar(e) + '">' + escapar(e) + "</option>").join("");
+  selE.disabled = ESTADO.escuelas.length === 0;
+  selC.innerHTML = opcionesCarrera();
+  selC.disabled = ESTADO.carreras.size === 0;
+
+  selE.addEventListener("change", () => {
+    ESTADO.filtros.escuela = selE.value;
+    /* Una carrera de otra escuela dejaría la vista vacía sin motivo aparente. */
+    const c = ESTADO.carreras.get(norm(ESTADO.filtros.carrera));
+    if (ESTADO.filtros.escuela && c && norm(c.escuela) !== norm(ESTADO.filtros.escuela)) ESTADO.filtros.carrera = "";
+    selC.innerHTML = opcionesCarrera();
+    aplicarFiltroGlobal();
+    renderizar();
+  });
+  selC.addEventListener("change", () => {
+    ESTADO.filtros.carrera = selC.value;
+    aplicarFiltroGlobal();
+    renderizar();
+  });
+}
+
+/** Rehace ESTADO.datos según el filtro de escuela y carrera. */
+function aplicarFiltroGlobal(){
+  const f = ESTADO.filtros;
+  const activo = filtroGlobalActivo();
+  ESTADO.expandidas = {};
+  CONFIG.indicadores.forEach(ind => {
+    const base = ESTADO.base[ind.id];
+    if (!base) return;
+    if (!activo || base.estado !== "ok"){ ESTADO.datos[ind.id] = base; return; }
+    const m = ESTADO.matrices[ind.id];
+    const dims = base.dimsDisponibles || [];
+    const puede = !!m && (!f.escuela || dims.includes("escuela")) && (!f.carrera || dims.includes("carrera"));
+    if (!puede){
+      ESTADO.datos[ind.id] = Object.assign({}, base, { estado: "nofiltrable" });
+      return;
+    }
+    SILENCIAR_ANOTAR = true;
+    try {
+      const r = leerTransaccional(ind, m, { escuela: f.escuela, carrera: f.carrera });
+      if (ind.personas){
+        r.unicos = null; r.unicosTodo = null; r.totalUnicos = 0;
+        r.unicosNoFiltrables = true;
+      }
+      r.corridas = base.corridas;
+      ESTADO.datos[ind.id] = r;
+    } catch (e){
+      ESTADO.datos[ind.id] = Object.assign({}, base, { estado: "error", error: e.message });
+    } finally {
+      SILENCIAR_ANOTAR = false;
+    }
+  });
+}
+
+/** Aviso para un indicador que no se puede filtrar. */
+function bloqueNoFiltrable(ind){
+  return '<div class="aviso visible"><span>&#9888;</span><div><strong>' + escapar(TEXTO_NO_FILTRABLE) +
+    "</strong> — " + escapar(ind.nombre) + " no registra la carrera de quien usa el servicio " +
+    "(los arcos de conteo no identifican al usuario). Elige «Todas las escuelas» y «Todas las " +
+    "carreras» arriba para ver sus cifras.</div></div>";
+}
+
 function actualizarEtiquetaSedes(){
   const n = ESTADO.filtros.sedes.size;
   document.getElementById("etq-sedes").textContent = n === 0
@@ -3183,6 +3376,9 @@ function renderizarChips(){
       (esReporte ? "" : " · distinto al mes de reporte") + "</span>");
   }
 
+  if (filtroGlobalActivo()){
+    chips.push('<span class="chip acento">Filtro: <b>' + escapar(etiquetaFiltroGlobal()) + "</b></span>");
+  }
   if (ESTADO.vistaActiva === "acciones_formativas" && hayFiltrosAF()){
     const f = ESTADO.filtrosAF;
     const act = [f.actividad, f.accion, f.escuela, f.carrera, f.ia && ("IA: " + f.ia)].filter(Boolean);
@@ -3199,6 +3395,8 @@ function textoFiltros(){
     : n + " de " + ESTADO.sedes.length + " sedes (" + [...ESTADO.filtros.sedes].sort((a, b) => a.localeCompare(b, "es")).join(", ") + ")";
   const partes = ["Sede: " + sedes,
     "Período: " + etiquetaSeleccion() + (esAcumulado() ? " · " + mesesSeleccionados().length + " meses acumulados" : "")];
+  if (ESTADO.filtros.escuela) partes.push("Escuela: " + ESTADO.filtros.escuela);
+  if (ESTADO.filtros.carrera) partes.push("Carrera: " + etiquetaFiltroGlobal().split(" · ").pop());
   if (ESTADO.vistaActiva === "acciones_formativas" && hayFiltrosAF()){
     const f = ESTADO.filtrosAF;
     if (f.actividad) partes.push("Tipo de actividad: " + f.actividad);
@@ -3256,6 +3454,7 @@ function renderizar(){
   else if (v === "acciones_formativas") renderAccionesFormativas();
   /* Pasada final: los botones de descarga se inyectan leyendo el DOM ya construido. */
   agregarBotonesDeTabla();
+  agregarBotonesDeGrafico();
 }
 
 function actualizarEncabezado(){
@@ -3322,6 +3521,7 @@ function seccion(titulo, cuerpo, pista, controles){
 }
 function bloqueError(ind){
   const d = ESTADO.datos[ind.id];
+  if (d && d.estado === "nofiltrable") return bloqueNoFiltrable(ind);
   return '<div class="bloque-error"><strong>No se pudieron cargar los datos de ' + escapar(ind.nombre) + "</strong>" +
     escapar(d ? d.error : "Error desconocido") +
     '<br><br>Hoja de origen: <code>' + escapar(urlHoja(ind.gid)) + "</code>" +
@@ -3394,6 +3594,11 @@ function renderResumen(){
 
   const kpis = CONFIG.indicadores.map(ind => {
     const d = ESTADO.datos[ind.id];
+    if (d && d.estado === "nofiltrable"){
+      return '<div class="kpi"><div class="titulo">' + escapar(ind.nombre) + "</div>" +
+        '<div class="valor no-disponible">No disponible</div>' +
+        '<div class="pie"><span>No se puede filtrar por escuela ni carrera: los arcos no identifican al usuario.</span></div></div>';
+    }
     if (!d || d.estado !== "ok"){
       return '<div class="kpi error"><div class="titulo">' + escapar(ind.nombre) + "</div>" +
         '<div class="msj-error">No se pudo cargar esta hoja.</div>' +
@@ -3403,7 +3608,9 @@ function renderResumen(){
     const anterior = hayPrev ? valorResumen(ind.id, { anio: prev, meses }) : null;
     /* Dato secundario común: personas distintas que usaron el servicio. */
     const u = unicosDe(ind.id, { anio: ref, meses });
-    const secundario = u ? "Usuarios únicos: <b>" + fmtTxt(u) + "</b>" : "";
+    const secundario = d.unicosNoFiltrables
+      ? "Usuarios únicos: <b>no disponible</b> con filtro de escuela o carrera"
+      : (u ? "Usuarios únicos: <b>" + fmtTxt(u) + "</b>" : "");
     return tarjeta(ind.nombre, actual, unidadResumen(ind.id), {
       anterior: hayPrev ? anterior : undefined,
       etiquetaAnterior: etiquetaSeleccion(prev),
@@ -3416,7 +3623,8 @@ function renderResumen(){
     '<div class="mini"><h3>' + escapar(ind.nombreCorto) + "</h3><div class=\"cuerpo\">" +
     (ESTADO.datos[ind.id] && ESTADO.datos[ind.id].estado === "ok"
       ? '<div class="caja-grafico"><canvas id="g-evo-' + ind.id + '"></canvas></div>'
-      : '<div class="vacio">Sin datos disponibles</div>') +
+      : '<div class="vacio">' + (ESTADO.datos[ind.id] && ESTADO.datos[ind.id].estado === "nofiltrable"
+          ? escapar(TEXTO_NO_FILTRABLE) : "Sin datos disponibles") + "</div>") +
     "</div></div>").join("");
 
   document.getElementById("vista-resumen").innerHTML =
@@ -3436,11 +3644,20 @@ function renderResumen(){
       
       "Cuenta Personas no aparece porque los arcos de conteo no identifican al usuario.</p>") +
 
+    seccion("Uso por escuela",
+      '<div class="envoltorio-tabla" id="cont-escuela-servicio"></div>' +
+      '<p class="nota">Cada columna es la métrica principal del servicio, la misma de las tarjetas de arriba: ' +
+      "los dos materiales en préstamos, T. Digital en accesos y Acciones Formativas en participaciones. " +
+      "Los porcentajes son la parte de cada escuela <strong>dentro de su propio servicio</strong>. " +
+      "Cuenta Personas no aparece porque los arcos no identifican la carrera del usuario.</p>",
+      "Escuela de la carrera del usuario, por servicio") +
+
     seccion("Comparativa por sede · " + etiquetaSeleccion(),
       '<div class="envoltorio-tabla" id="cont-tabla-resumen"></div>' +
       '<p class="nota">Se muestra la métrica principal de cada indicador: los dos materiales en ' +
       "préstamos, T. Digital en accesos, Cuenta Personas en ingresos y Acciones Formativas en " +
-      "participaciones. Haz clic en los encabezados para ordenar.</p>");
+      "participaciones. Haz clic en los encabezados para ordenar." +
+      (filtroGlobalActivo() ? " Con filtro de escuela o carrera, Cuenta Personas no tiene dato." : "") + "</p>");
 
   CONFIG.indicadores.forEach(ind => {
     if (!ESTADO.datos[ind.id] || ESTADO.datos[ind.id].estado !== "ok") return;
@@ -3452,7 +3669,61 @@ function renderResumen(){
     }
   });
   renderComparativoPerfil();
+  renderEscuelaServicio();
   renderTablaResumen();
+}
+
+/**
+ * Tabla escuela × servicio del Resumen.
+ * Usa la misma métrica de cada tarjeta: Bibliográfico por sus préstamos —vía el cruce
+ * tipo × escuela—, No Bibliográfico en préstamos, Digital en accesos y Formativas en
+ * participaciones. Así la columna suma lo mismo que su tarjeta.
+ */
+function renderEscuelaServicio(){
+  const cont = document.getElementById("cont-escuela-servicio");
+  if (!cont) return;
+  const { ref } = anios();
+  const meses = mesesSeleccionados();
+  const p = { anio: ref, meses };
+  const servicios = CONFIG.indicadores.filter(ind => ind.dimensiones && ind.dimensiones.escuela);
+  const columnas = servicios.map(ind => {
+    const d = ESTADO.datos[ind.id];
+    if (!d || d.estado !== "ok") return { ind, mapa: null };
+    let lista;
+    if (ind.resumen && ind.resumen.tipo){
+      if (!tieneDim(ind.id, "tipoEscuela")) return { ind, mapa: null };
+      lista = desgloseCruzado(ind.id, "tipoEscuela", ind.resumen.tipo, p);
+    } else {
+      if (!tieneDim(ind.id, "escuela")) return { ind, mapa: null };
+      lista = desglose(ind.id, "escuela", p);
+    }
+    const mapa = new Map(lista.map(x => [x.etiqueta, x.valor]));
+    const suma = lista.reduce((t, x) => t + x.valor, 0);
+    return { ind, mapa, suma };
+  });
+  if (columnas.every(c => !c.mapa)){
+    cont.innerHTML = '<div class="vacio">Las hojas todavía no traen la columna «Escuela».</div>';
+    return;
+  }
+  const todas = new Map();
+  columnas.forEach(c => { if (c.mapa) c.mapa.forEach((v, k) => todas.set(k, (todas.get(k) || 0) + 0)); });
+  /* Mismo orden que los demás desgloses de escuela: las reales primero, por volumen total. */
+  const volumen = k => columnas.reduce((t, c) => t + (c.mapa && c.suma ? (c.mapa.get(k) || 0) / c.suma : 0), 0);
+  const filas = agruparEscuelas([...todas.keys()].map(k => ({ etiqueta: k, valor: volumen(k) })));
+
+  let html = '<table class="datos"><thead><tr><th class="izq">Escuela</th>' +
+    columnas.map(c => "<th>" + escapar(c.ind.nombreCorto) + " · " + escapar(unidadResumen(c.ind.id)) + "</th><th>%</th>").join("") +
+    "</tr></thead><tbody>";
+  filas.forEach(f => {
+    html += '<tr><td class="izq normal">' + escapar(f.etiqueta) + "</td>" + columnas.map(c => {
+      if (!c.mapa) return '<td>—</td><td>—</td>';
+      const v = c.mapa.get(f.etiqueta) || 0;
+      return "<td>" + fmt(v) + "</td><td>" + pct(v, c.suma) + "</td>";
+    }).join("") + "</tr>";
+  });
+  html += "</tbody><tfoot><tr><td class='izq'>Total</td>" + columnas.map(c =>
+    c.mapa ? "<td>" + fmt(c.suma) + "</td><td>100,0%</td>" : "<td>—</td><td>—</td>").join("") + "</tr></tfoot></table>";
+  cont.innerHTML = html;
 }
 
 /* ---------------------------------------------------------------------------------
@@ -3542,8 +3813,12 @@ function tarjetaSistema(ref, prev, hayPrev, meses){
   const inter = totalInteracciones({ anio: ref, meses });
   if (!inter) return "";
   const interPrev = hayPrev ? totalInteracciones({ anio: prev, meses }) : null;
-  const personas = unicosSistema({ anio: ref, meses });
-  const personasPrev = hayPrev ? unicosSistema({ anio: prev, meses }) : null;
+  /* Con filtro de escuela o carrera las personas del sistema no se pueden contar: las de
+     Préstamos y Digital no traen carrera, y contar solo las de Formativas mostraría una
+     cifra mucho menor que se leería como la de esa escuela. */
+  const sinPersonas = CONFIG.indicadores.some(i => ESTADO.datos[i.id] && ESTADO.datos[i.id].unicosNoFiltrables);
+  const personas = sinPersonas ? null : unicosSistema({ anio: ref, meses });
+  const personasPrev = (hayPrev && !sinPersonas) ? unicosSistema({ anio: prev, meses }) : null;
   const dom = servicioDominante({ anio: ref, meses });
   /* Cuánto de esta cifra no está en los desgloses por sede. */
   const estricto = totalInteraccionesEstricto({ anio: ref, meses });
@@ -3557,8 +3832,12 @@ function tarjetaSistema(ref, prev, hayPrev, meses){
         ? '<div class="pie">' + htmlVariacion(variacion(inter, interPrev)) +
           "<span>vs. " + escapar(etiquetaSeleccion(prev)) + ": " + fmtTxt(interPrev) + "</span></div>"
         : "") +
-      (dom ? '<p class="nota">Suma los cinco servicios: ingresos, accesos digitales, préstamos, ' +
-        "renovaciones y participaciones en formación. " + escapar(dom.nombre) + " concentra " +
+      (dom ? '<p class="nota">' + (filtroGlobalActivo()
+        ? "Con el filtro " + escapar(etiquetaFiltroGlobal()) + ": suma accesos digitales, préstamos, " +
+          "renovaciones y participaciones en formación. No incluye los ingresos de Cuenta Personas, " +
+          "que no registran la carrera. "
+        : "Suma los cinco servicios: ingresos, accesos digitales, préstamos, " +
+          "renovaciones y participaciones en formación. ") + escapar(dom.nombre) + " concentra " +
         FMT_DECIMAL.format(dom.parte * 100) + "% del total." +
         /* Se dice de frente: esta cifra cuenta más que los desgloses por sede. Quien
            sume las barras del gráfico va a obtener menos, y tiene que saber por qué. */
@@ -3569,7 +3848,11 @@ function tarjetaSistema(ref, prev, hayPrev, meses){
     "</div>" +
     '<div class="secundaria">' +
       '<div class="titulo">Usuarios que han usado servicios de la Biblioteca</div>' +
-      '<div class="valor">' + fmt(personas) + '<span class="unidad">personas</span></div>' +
+      (sinPersonas
+        ? '<div class="valor no-disponible">No disponible</div>' +
+          '<p class="nota">' + escapar(TEXTO_NO_FILTRABLE) + ": las hojas de personas de Préstamos y " +
+          "T. Digital no registran la carrera.</p>"
+        : '<div class="valor">' + fmt(personas) + '<span class="unidad">personas</span></div>') +
       (personasPrev !== null
         ? '<div class="pie">' + htmlVariacion(variacion(personas, personasPrev)) + "</div>"
         : "") +
@@ -3754,7 +4037,7 @@ function renderMaterial(idInd){
         '<div><div class="caja-grafico alta"><canvas id="g-' + idInd + '-carrera"></canvas></div></div>' +
         '<div><div class="envoltorio-tabla limitada" id="cont-' + idInd + '-carrera"></div></div>' +
       "</div>",
-      BASE_MATERIAL + " · gráfico con las " + C.topCarreras + " principales; la tabla se puede desplegar completa");
+      BASE_MATERIAL + " · las " + C.topCarreras + " principales; «Ver todo» despliega la lista completa");
 
   if (ind.conRenovaciones){
     html +=
@@ -3795,16 +4078,13 @@ function renderMaterial(idInd){
   tablaDesglose("cont-" + idInd + "-perfil", recortarTop(perfiles, 10, "Otros perfiles"), "Perfil", "Transacciones");
 
   if (tieneDim(idInd, "escuela")){
-    const escuelas = agruparEscuelas(desglose(idInd, "escuela", p));
-    dibujarBarrasHorizontal("g-" + idInd + "-escuela", escuelas, "Transacciones");
-    tablaDesglose("cont-" + idInd + "-escuela", escuelas, "Escuela", "Transacciones");
+    desgloseExpandible("g-" + idInd + "-escuela", "cont-" + idInd + "-escuela",
+      agruparEscuelas(desglose(idInd, "escuela", p)), C.topCarreras,
+      "Otras escuelas", "Escuela", "Transacciones");
   }
-
-  const todasCarreras = agruparCarreras(desglose(idInd, "carrera", p));
-  dibujarBarrasHorizontal("g-" + idInd + "-carrera",
-    recortarTop(todasCarreras, C.topCarreras, "Otras carreras"), "Transacciones");
-  tablaDesgloseExpandible("cont-" + idInd + "-carrera", todasCarreras, C.topCarreras,
-    "Otras carreras", "Carrera", "Transacciones", "carreras");
+  desgloseExpandible("g-" + idInd + "-carrera", "cont-" + idInd + "-carrera",
+    agruparCarreras(desglose(idInd, "carrera", p)), C.topCarreras,
+    "Otras carreras", "Carrera", "Transacciones");
 
   if (ind.conRenovaciones){
     dibujarSerieDimension("g-" + idInd + "-renov", idInd, "tipo", C.tipoRenovacion, "Renovaciones por mes");
@@ -3851,8 +4131,12 @@ function renderTDigital(){
     nota: notaAmpliado(ind.id, { anio: ref, meses }, "accesos") });
 
   const kpis =
-    tarjeta("Usuarios que han hecho uso de Recursos Digitales", unicos, "personas", {
-      anterior: hayPrev ? unicosPrev : undefined, etiquetaAnterior: etiquetaSeleccion(prev) }) +
+    (d.unicosNoFiltrables
+      ? '<div class="kpi"><div class="titulo">Usuarios que han hecho uso de Recursos Digitales</div>' +
+        '<div class="valor no-disponible">No disponible</div>' +
+        '<div class="pie"><span>' + escapar(TEXTO_NO_FILTRABLE) + ": la hoja de personas no registra la carrera.</span></div></div>"
+      : tarjeta("Usuarios que han hecho uso de Recursos Digitales", unicos, "personas", {
+          anterior: hayPrev ? unicosPrev : undefined, etiquetaAnterior: etiquetaSeleccion(prev) })) +
     tarjeta("Recurso más consultado", recursos.length ? recursos[0].valor : null, "", {
       pie: "<span>" + escapar(recursos.length ? recursos[0].etiqueta : "—") + "</span>" });
 
@@ -3901,8 +4185,7 @@ function renderTDigital(){
       "Por eso el total del año es menor que la suma de los meses.</p>");
 
   const topRec = recortarTop(recursos, CONFIG.criterios.topRecursos, "Otros recursos");
-  const todasCarreras = agruparCarreras(desglose(ind.id, "carrera", { anio: ref, meses }));
-  const carreras = recortarTop(todasCarreras, CONFIG.criterios.topCarreras, "Otras carreras");
+
   const perfiles = desglose(ind.id, "perfil", { anio: ref, meses });
 
   dibujarEvolucion("g-td-evo", ind.id, "valor");
@@ -3910,13 +4193,13 @@ function renderTDigital(){
   dibujarBarrasHorizontal("g-td-recurso", topRec, "Accesos");
   tablaDesglose("cont-td-recurso", topRec, "Recurso", "Accesos");
   if (tieneDim(ind.id, "escuela")){
-    const escuelas = agruparEscuelas(desglose(ind.id, "escuela", { anio: ref, meses }));
-    dibujarBarrasHorizontal("g-td-escuela", escuelas, "Accesos");
-    tablaDesglose("cont-td-escuela", escuelas, "Escuela", "Accesos");
+    desgloseExpandible("g-td-escuela", "cont-td-escuela",
+      agruparEscuelas(desglose(ind.id, "escuela", { anio: ref, meses })), CONFIG.criterios.topCarreras,
+      "Otras escuelas", "Escuela", "Accesos");
   }
-  dibujarBarrasHorizontal("g-td-carrera", carreras, "Accesos");
-  tablaDesgloseExpandible("cont-td-carrera", todasCarreras, CONFIG.criterios.topCarreras,
-    "Otras carreras", "Carrera", "Accesos", "carreras");
+  desgloseExpandible("g-td-carrera", "cont-td-carrera",
+    agruparCarreras(desglose(ind.id, "carrera", { anio: ref, meses })), CONFIG.criterios.topCarreras,
+    "Otras carreras", "Carrera", "Accesos");
   dibujarTorta("g-td-perfil", perfiles);
   tablaDesglose("cont-td-perfil", perfiles, "Perfil", "Accesos");
 }
@@ -4098,16 +4381,14 @@ function renderAccionesFormativas(){
   dibujarTorta("g-af-tipo", contarAF(filas, "actividad"));
   dibujarTorta("g-af-jornada", contarAF(filas, "tipoUsuario"));
   if (tieneDim(ind.id, "carrera")){
-    const todasCarreras = agruparCarreras(contarAF(filas, "carrera"));
-    dibujarBarrasHorizontal("g-af-carrera",
-      recortarTop(todasCarreras, CONFIG.criterios.topCarreras, "Otras carreras"), "Participaciones");
-    tablaDesgloseExpandible("cont-af-carrera", todasCarreras, CONFIG.criterios.topCarreras,
-      "Otras carreras", "Carrera", "Participaciones", "carreras");
+    desgloseExpandible("g-af-carrera", "cont-af-carrera",
+      agruparCarreras(contarAF(filas, "carrera")), CONFIG.criterios.topCarreras,
+      "Otras carreras", "Carrera", "Participaciones");
   }
   if (tieneDim(ind.id, "escuela")){
-    const escuelas = agruparEscuelas(contarAF(filas, "escuela"));
-    dibujarBarrasHorizontal("g-af-escuela", escuelas, "Participaciones");
-    tablaDesglose("cont-af-escuela", escuelas, "Escuela", "Participaciones");
+    desgloseExpandible("g-af-escuela", "cont-af-escuela",
+      agruparEscuelas(contarAF(filas, "escuela")), CONFIG.criterios.topCarreras,
+      "Otras escuelas", "Escuela", "Participaciones");
   }
   dibujarTorta("g-af-ia", contarAF(filas, "ia"));
   dibujarTorta("g-af-formato", contarAF(filas, "formato"));
@@ -4132,8 +4413,7 @@ function filtrosLocalesAF(){
   const controles =
     selector("actividad", "af-actividad", f.actividad, "Todos los tipos", "Tipo de actividad") +
     selector("accion", "af-accion", f.accion, "Todas las actividades", "Nombre de la actividad") +
-    selector("escuela", "af-escuela", f.escuela, "Todas las escuelas", "Escuela") +
-    selector("carrera", "af-carrera", f.carrera, "Todas las carreras", "Carrera") +
+
     selector("ia", "af-ia", f.ia, "IA: todas", "Taller de IA");
   if (!controles) return "";
   return '<div class="filtros-locales">' +
@@ -4148,8 +4428,7 @@ function activarFiltrosLocalesAF(){
   };
   enlazar("af-actividad", "actividad");
   enlazar("af-accion", "accion");
-  enlazar("af-escuela", "escuela");
-  enlazar("af-carrera", "carrera");
+
   enlazar("af-ia", "ia");
   const limpiar = document.getElementById("af-limpiar");
   if (limpiar) limpiar.addEventListener("click", () => {
@@ -5108,6 +5387,80 @@ function agregarBotonesDeTabla(){
   });
 }
 
+/* ----------------------------------------------------------------------------------
+   DESCARGA DE GRÁFICOS
+   Cada gráfico lleva su barra con dos botones: la imagen, para pegarla en una
+   presentación, y un Excel con los mismos números que dibuja.
+   ---------------------------------------------------------------------------------- */
+function etiquetaDeGrafico(caja){
+  const sec = caja.closest(".seccion");
+  const h2 = sec ? sec.querySelector("header h2") : null;
+  const mini = caja.closest(".mini");
+  const h3 = mini ? mini.querySelector("h3") : null;
+  const partes = [];
+  if (h2) partes.push(h2.textContent.trim());
+  if (h3) partes.push(h3.textContent.trim());
+  return partes.join(" · ") || "Gráfico";
+}
+
+/** Los números de un gráfico como matriz para construirLibro(). */
+function graficoAMatriz(chart){
+  const etiquetas = chart.data.labels || [];
+  const series = chart.data.datasets || [];
+  const enc = [""].concat(series.map((d, i) => d.label || (series.length === 1 ? "Valor" : "Serie " + (i + 1))));
+  const cuerpo = etiquetas.map((e, i) => [Array.isArray(e) ? e.join(" ") : String(e)]
+    .concat(series.map(d => { const v = d.data[i]; return (v === null || v === undefined) ? "" : (typeof v === "object" ? (v.y ?? v.x ?? "") : v); })));
+  return { filas: [enc].concat(cuerpo), encabezados: 1, pies: 0 };
+}
+
+function descargarPngGrafico(chart, etiqueta){
+  const origen = chart.canvas;
+  /* El lienzo es transparente; sobre fondo blanco se ve igual que en pantalla. */
+  const c = document.createElement("canvas");
+  c.width = origen.width; c.height = origen.height;
+  const g = c.getContext("2d");
+  g.fillStyle = "#FFFFFF"; g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(origen, 0, 0);
+  const a = document.createElement("a");
+  a.href = c.toDataURL("image/png");
+  a.download = baseNombreArchivo() + "-" + slugDe(etiqueta) + ".png";
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+function agregarBotonesDeGrafico(){
+  const vista = document.querySelector(".vista.activa");
+  if (!vista) return;
+  vista.querySelectorAll(".caja-grafico canvas").forEach(canvas => {
+    const caja = canvas.parentElement;
+    const previo = caja.previousElementSibling;
+    if (previo && previo.classList.contains("barra-grafico")) return;
+    const etiqueta = etiquetaDeGrafico(caja);
+    const barra = document.createElement("div");
+    barra.className = "barra-tabla barra-grafico";
+    barra.innerHTML = '<span class="etq">' + escapar(etiqueta) + "</span>";
+
+    const bPng = document.createElement("button");
+    bPng.type = "button"; bPng.textContent = "Imagen";
+    bPng.title = "Descargar este gráfico como imagen PNG";
+    bPng.addEventListener("click", () => {
+      const ch = ESTADO.graficos[canvas.id];
+      if (ch) descargarPngGrafico(ch, etiqueta);
+    });
+
+    const bXls = document.createElement("button");
+    bXls.type = "button"; bXls.textContent = "Excel";
+    bXls.title = "Descargar los datos de este gráfico en Excel";
+    bXls.addEventListener("click", () => {
+      const ch = ESTADO.graficos[canvas.id];
+      if (!ch) return;
+      exportarExcelTabla({ etiqueta, matriz: () => graficoAMatriz(ch) }, bXls);
+    });
+
+    barra.appendChild(bPng); barra.appendChild(bXls);
+    caja.parentNode.insertBefore(barra, caja);
+  });
+}
+
 /* ==================================================================================
    EXPORTACIÓN A PDF
    window.print() con hoja @media print dedicada: las tablas salen como tablas reales
@@ -5190,9 +5543,14 @@ async function iniciar(){
     return;
   }
 
+  /* Lo cargado, sin filtro de escuela ni carrera: el filtro arma sus cifras desde acá
+     y vuelve acá al quitarse. */
+  CONFIG.indicadores.forEach(i => { ESTADO.base[i.id] = ESTADO.datos[i.id]; });
+
   construirMenu();
   construirContenedores();
   construirFiltros();
+  construirFiltroGlobal();
   renderizar();
   document.getElementById("btn-pdf").addEventListener("click", exportarPdf);
 
