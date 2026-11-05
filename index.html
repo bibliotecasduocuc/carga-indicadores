@@ -529,9 +529,9 @@ main{padding:26px 28px 72px;max-width:1720px;margin:0 auto;}
 /* Botón «Ver todas» de las tablas largas. No es fijo: el encabezado de la tabla ya lo es
    y los dos se taparían al desplazarse. */
 .ver-todas{
-  display:block;width:100%;text-align:left;
-  font:inherit;font-size:12px;font-weight:700;color:var(--tinta);cursor:pointer;
-  background:#FFF8E8;border:0;border-bottom:1px solid var(--linea);padding:8px 12px;
+  display:block;width:100%;margin-top:8px;text-align:center;
+  font:inherit;font-size:12.5px;font-weight:700;color:var(--tinta);cursor:pointer;
+  background:#FFF8E8;border:1px solid #F0DFB4;border-radius:var(--radio);padding:9px 12px;
 }
 .ver-todas:hover{background:#FFEFC7;}
 .ver-todas:focus-visible{outline:2px solid #F5A800;outline-offset:-2px;}
@@ -2968,22 +2968,29 @@ function desgloseExpandible(idGrafico, idTabla, lista, n, etiquetaResto, etiquet
   dibujarBarrasHorizontal(idGrafico, visible, etiquetaValor);
   tablaDesglose(idTabla, visible, etiquetaCol, etiquetaValor);
 
+  /* El botón va DEBAJO del recuadro de la tabla, no adentro: el recuadro se desplaza y
+     un botón arriba quedaba fuera de la vista justo cuando uno llega a «Otras». */
+  const idBoton = "vt-" + idTabla;
+  const previo = document.getElementById(idBoton);
+  if (previo) previo.remove();
   if (!cont || lista.length <= n) return;
   const reales = lista.filter(x => !x.esNoAplica).length;
   const boton = document.createElement("button");
   boton.type = "button";
+  boton.id = idBoton;
   boton.className = "ver-todas";
   boton.setAttribute("aria-expanded", abierta ? "true" : "false");
-  boton.textContent = abierta ? "Ver solo las " + n + " principales" : "Ver todo (" + fmt(reales) + ")";
+  boton.setAttribute("aria-controls", idTabla);
+  boton.textContent = abierta ? "Ver solo las " + n + " principales" : "Ver todas (" + fmt(reales) + ")";
   boton.addEventListener("click", () => {
     ESTADO.expandidas[idTabla] = !abierta;
     desgloseExpandible(idGrafico, idTabla, lista, n, etiquetaResto, etiquetaCol, etiquetaValor);
     /* La barra de descarga de la tabla vive afuera del contenedor y sigue sirviendo. */
     agregarBotonesDeGrafico();
-    const nuevo = document.querySelector("#" + idTabla + " .ver-todas");
+    const nuevo = document.getElementById(idBoton);
     if (nuevo) nuevo.focus();
   });
-  cont.insertBefore(boton, cont.firstChild);
+  cont.parentNode.insertBefore(boton, cont.nextSibling);
 }
 
 /** ¿Este valor es un «sin carrera» o «sin identificar»? */
